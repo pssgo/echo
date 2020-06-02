@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type (
@@ -24,6 +25,9 @@ type (
 
 		// SetRequest sets `*http.Request`.
 		SetRequest(r *http.Request)
+
+		// SetResponse sets `*Response`.
+		SetResponse(r *Response)
 
 		// Response returns `*Response`.
 		Response() *Response
@@ -39,6 +43,7 @@ type (
 
 		// RealIP returns the client's network address based on `X-Forwarded-For`
 		// or `X-Real-IP` request header.
+		// The behavior can be configured using `Echo#IPExtractor`.
 		RealIP() string
 
 		// Path returns the registered path for the handler.
@@ -179,6 +184,9 @@ type (
 		// Logger returns the `Logger` instance.
 		Logger() Logger
 
+		// Set the logger
+		SetLogger(l Logger)
+
 		// Echo returns the `Echo` instance.
 		Echo() *Echo
 
@@ -198,12 +206,15 @@ type (
 		handler  HandlerFunc
 		store    Map
 		echo     *Echo
+		logger   Logger
+		lock     sync.RWMutex
 	}
 )
 
 const (
 	defaultMemory = 32 << 20 // 32 MB
 	indexPage     = "index.html"
+	defaultIndent = "  "
 )
 
 func (c *context) writeContentType(value string) {
@@ -225,13 +236,17 @@ func (c *context) Response() *Response {
 	return c.response
 }
 
+func (c *context) SetResponse(r *Response) {
+	c.response = r
+}
+
 func (c *context) IsTLS() bool {
 	return c.request.TLS != nil
 }
 
 func (c *context) IsWebSocket() bool {
 	upgrade := c.request.Header.Get(HeaderUpgrade)
-	return upgrade == "websocket" || upgrade == "Websocket"
+	return strings.ToLower(upgrade) == "websocket"
 }
 
 func (c *context) Scheme() string {
@@ -256,14 +271,17 @@ func (c *context) Scheme() string {
 }
 
 func (c *context) RealIP() string {
-	ra := c.request.RemoteAddr
-	if ip := c.request.Header.Get(HeaderXForwardedFor); ip != "" {
-		ra = strings.Split(ip, ", ")[0]
-	} else if ip := c.request.Header.Get(HeaderXRealIP); ip != "" {
-		ra = ip
-	} else {
-		ra, _, _ = net.SplitHostPort(ra)
+	if c.echo != nil && c.echo.IPExtractor != nil {
+		return c.echo.IPExtractor(c.request)
 	}
+	// Fall back to legacy behavior
+	if ip := c.request.Header.Get(HeaderXForwardedFor); ip != "" {
+		return strings.Split(ip, ", ")[0]
+	}
+	if ip := c.request.Header.Get(HeaderXRealIP); ip != "" {
+		return ip
+	}
+	ra, _, _ := net.SplitHostPort(c.request.RemoteAddr)
 	return ra
 }
 
@@ -292,6 +310,7 @@ func (c *context) ParamNames() []string {
 
 func (c *context) SetParamNames(names ...string) {
 	c.pnames = names
+	*c.echo.maxParam = len(names)
 }
 
 func (c *context) ParamValues() []string {
@@ -338,8 +357,12 @@ func (c *context) FormParams() (url.Values, error) {
 }
 
 func (c *context) FormFile(name string) (*multipart.FileHeader, error) {
-	_, fh, err := c.request.FormFile(name)
-	return fh, err
+	f, fh, err := c.request.FormFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return fh, nil
 }
 
 func (c *context) MultipartForm() (*multipart.Form, error) {
@@ -360,10 +383,15 @@ func (c *context) Cookies() []*http.Cookie {
 }
 
 func (c *context) Get(key string) interface{} {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
 	return c.store[key]
 }
 
 func (c *context) Set(key string, val interface{}) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
 	if c.store == nil {
 		c.store = make(Map)
 	}
@@ -404,24 +432,46 @@ func (c *context) String(code int, s string) (err error) {
 	return c.Blob(code, MIMETextPlainCharsetUTF8, []byte(s))
 }
 
-func (c *context) JSON(code int, i interface{}) (err error) {
+func (c *context) jsonPBlob(code int, callback string, i interface{}) (err error) {
+	enc := json.NewEncoder(c.response)
 	_, pretty := c.QueryParams()["pretty"]
 	if c.echo.Debug || pretty {
-		return c.JSONPretty(code, i, "  ")
+		enc.SetIndent("", "  ")
 	}
-	b, err := json.Marshal(i)
-	if err != nil {
+	c.writeContentType(MIMEApplicationJavaScriptCharsetUTF8)
+	c.response.WriteHeader(code)
+	if _, err = c.response.Write([]byte(callback + "(")); err != nil {
 		return
 	}
-	return c.JSONBlob(code, b)
+	if err = enc.Encode(i); err != nil {
+		return
+	}
+	if _, err = c.response.Write([]byte(");")); err != nil {
+		return
+	}
+	return
+}
+
+func (c *context) json(code int, i interface{}, indent string) error {
+	enc := json.NewEncoder(c.response)
+	if indent != "" {
+		enc.SetIndent("", indent)
+	}
+	c.writeContentType(MIMEApplicationJSONCharsetUTF8)
+	c.response.Status = code
+	return enc.Encode(i)
+}
+
+func (c *context) JSON(code int, i interface{}) (err error) {
+	indent := ""
+	if _, pretty := c.QueryParams()["pretty"]; c.echo.Debug || pretty {
+		indent = defaultIndent
+	}
+	return c.json(code, i, indent)
 }
 
 func (c *context) JSONPretty(code int, i interface{}, indent string) (err error) {
-	b, err := json.MarshalIndent(i, "", indent)
-	if err != nil {
-		return
-	}
-	return c.JSONBlob(code, b)
+	return c.json(code, i, indent)
 }
 
 func (c *context) JSONBlob(code int, b []byte) (err error) {
@@ -429,11 +479,7 @@ func (c *context) JSONBlob(code int, b []byte) (err error) {
 }
 
 func (c *context) JSONP(code int, callback string, i interface{}) (err error) {
-	b, err := json.Marshal(i)
-	if err != nil {
-		return
-	}
-	return c.JSONPBlob(code, callback, b)
+	return c.jsonPBlob(code, callback, i)
 }
 
 func (c *context) JSONPBlob(code int, callback string, b []byte) (err error) {
@@ -449,24 +495,29 @@ func (c *context) JSONPBlob(code int, callback string, b []byte) (err error) {
 	return
 }
 
-func (c *context) XML(code int, i interface{}) (err error) {
-	_, pretty := c.QueryParams()["pretty"]
-	if c.echo.Debug || pretty {
-		return c.XMLPretty(code, i, "  ")
+func (c *context) xml(code int, i interface{}, indent string) (err error) {
+	c.writeContentType(MIMEApplicationXMLCharsetUTF8)
+	c.response.WriteHeader(code)
+	enc := xml.NewEncoder(c.response)
+	if indent != "" {
+		enc.Indent("", indent)
 	}
-	b, err := xml.Marshal(i)
-	if err != nil {
+	if _, err = c.response.Write([]byte(xml.Header)); err != nil {
 		return
 	}
-	return c.XMLBlob(code, b)
+	return enc.Encode(i)
+}
+
+func (c *context) XML(code int, i interface{}) (err error) {
+	indent := ""
+	if _, pretty := c.QueryParams()["pretty"]; c.echo.Debug || pretty {
+		indent = defaultIndent
+	}
+	return c.xml(code, i, indent)
 }
 
 func (c *context) XMLPretty(code int, i interface{}, indent string) (err error) {
-	b, err := xml.MarshalIndent(i, "", indent)
-	if err != nil {
-		return
-	}
-	return c.XMLBlob(code, b)
+	return c.xml(code, i, indent)
 }
 
 func (c *context) XMLBlob(code int, b []byte) (err error) {
@@ -560,7 +611,15 @@ func (c *context) SetHandler(h HandlerFunc) {
 }
 
 func (c *context) Logger() Logger {
+	res := c.logger
+	if res != nil {
+		return res
+	}
 	return c.echo.Logger
+}
+
+func (c *context) SetLogger(l Logger) {
+	c.logger = l
 }
 
 func (c *context) Reset(r *http.Request, w http.ResponseWriter) {
@@ -571,6 +630,9 @@ func (c *context) Reset(r *http.Request, w http.ResponseWriter) {
 	c.store = nil
 	c.path = ""
 	c.pnames = nil
+	c.logger = nil
 	// NOTE: Don't reset because it has to have length c.echo.maxParam at all times
-	// c.pvalues = nil
+	for i := 0; i < *c.echo.maxParam; i++ {
+		c.pvalues[i] = ""
+	}
 }

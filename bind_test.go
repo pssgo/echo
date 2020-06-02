@@ -2,11 +2,15 @@ package echo
 
 import (
 	"bytes"
+	"encoding/json"
+	"encoding/xml"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,9 +50,48 @@ type (
 		PtrS        *string
 		cantSet     string
 		DoesntExist string
+		GoT         time.Time
+		GoTptr      *time.Time
 		T           Timestamp
 		Tptr        *Timestamp
 		SA          StringArray
+	}
+	bindTestStructWithTags struct {
+		I           int      `json:"I" form:"I"`
+		PtrI        *int     `json:"PtrI" form:"PtrI"`
+		I8          int8     `json:"I8" form:"I8"`
+		PtrI8       *int8    `json:"PtrI8" form:"PtrI8"`
+		I16         int16    `json:"I16" form:"I16"`
+		PtrI16      *int16   `json:"PtrI16" form:"PtrI16"`
+		I32         int32    `json:"I32" form:"I32"`
+		PtrI32      *int32   `json:"PtrI32" form:"PtrI32"`
+		I64         int64    `json:"I64" form:"I64"`
+		PtrI64      *int64   `json:"PtrI64" form:"PtrI64"`
+		UI          uint     `json:"UI" form:"UI"`
+		PtrUI       *uint    `json:"PtrUI" form:"PtrUI"`
+		UI8         uint8    `json:"UI8" form:"UI8"`
+		PtrUI8      *uint8   `json:"PtrUI8" form:"PtrUI8"`
+		UI16        uint16   `json:"UI16" form:"UI16"`
+		PtrUI16     *uint16  `json:"PtrUI16" form:"PtrUI16"`
+		UI32        uint32   `json:"UI32" form:"UI32"`
+		PtrUI32     *uint32  `json:"PtrUI32" form:"PtrUI32"`
+		UI64        uint64   `json:"UI64" form:"UI64"`
+		PtrUI64     *uint64  `json:"PtrUI64" form:"PtrUI64"`
+		B           bool     `json:"B" form:"B"`
+		PtrB        *bool    `json:"PtrB" form:"PtrB"`
+		F32         float32  `json:"F32" form:"F32"`
+		PtrF32      *float32 `json:"PtrF32" form:"PtrF32"`
+		F64         float64  `json:"F64" form:"F64"`
+		PtrF64      *float64 `json:"PtrF64" form:"PtrF64"`
+		S           string   `json:"S" form:"S"`
+		PtrS        *string  `json:"PtrS" form:"PtrS"`
+		cantSet     string
+		DoesntExist string      `json:"DoesntExist" form:"DoesntExist"`
+		GoT         time.Time   `json:"GoT" form:"GoT"`
+		GoTptr      *time.Time  `json:"GoTptr" form:"GoTptr"`
+		T           Timestamp   `json:"T" form:"T"`
+		Tptr        *Timestamp  `json:"Tptr" form:"Tptr"`
+		SA          StringArray `json:"SA" form:"SA"`
 	}
 	Timestamp   time.Time
 	TA          []Timestamp
@@ -112,36 +155,47 @@ var values = map[string][]string{
 	"cantSet": {"test"},
 	"T":       {"2016-12-06T19:09:05+01:00"},
 	"Tptr":    {"2016-12-06T19:09:05+01:00"},
+	"GoT":     {"2016-12-06T19:09:05+01:00"},
+	"GoTptr":  {"2016-12-06T19:09:05+01:00"},
 	"ST":      {"bar"},
 }
 
 func TestBindJSON(t *testing.T) {
-	testBindOkay(t, strings.NewReader(userJSON), MIMEApplicationJSON)
-	testBindError(t, strings.NewReader(invalidContent), MIMEApplicationJSON)
+	assert := assert.New(t)
+	testBindOkay(assert, strings.NewReader(userJSON), MIMEApplicationJSON)
+	testBindError(assert, strings.NewReader(invalidContent), MIMEApplicationJSON, &json.SyntaxError{})
+	testBindError(assert, strings.NewReader(userJSONInvalidType), MIMEApplicationJSON, &json.UnmarshalTypeError{})
 }
 
 func TestBindXML(t *testing.T) {
-	testBindOkay(t, strings.NewReader(userXML), MIMEApplicationXML)
-	testBindError(t, strings.NewReader(invalidContent), MIMEApplicationXML)
-	testBindOkay(t, strings.NewReader(userXML), MIMETextXML)
-	testBindError(t, strings.NewReader(invalidContent), MIMETextXML)
+	assert := assert.New(t)
+
+	testBindOkay(assert, strings.NewReader(userXML), MIMEApplicationXML)
+	testBindError(assert, strings.NewReader(invalidContent), MIMEApplicationXML, errors.New(""))
+	testBindError(assert, strings.NewReader(userXMLConvertNumberError), MIMEApplicationXML, &strconv.NumError{})
+	testBindError(assert, strings.NewReader(userXMLUnsupportedTypeError), MIMEApplicationXML, &xml.SyntaxError{})
+	testBindOkay(assert, strings.NewReader(userXML), MIMETextXML)
+	testBindError(assert, strings.NewReader(invalidContent), MIMETextXML, errors.New(""))
+	testBindError(assert, strings.NewReader(userXMLConvertNumberError), MIMETextXML, &strconv.NumError{})
+	testBindError(assert, strings.NewReader(userXMLUnsupportedTypeError), MIMETextXML, &xml.SyntaxError{})
 }
 
 func TestBindForm(t *testing.T) {
-	testBindOkay(t, strings.NewReader(userForm), MIMEApplicationForm)
-	testBindError(t, nil, MIMEApplicationForm)
+	assert := assert.New(t)
+
+	testBindOkay(assert, strings.NewReader(userForm), MIMEApplicationForm)
 	e := New()
-	req := httptest.NewRequest(POST, "/", strings.NewReader(userForm))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(userForm))
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	req.Header.Set(HeaderContentType, MIMEApplicationForm)
 	err := c.Bind(&[]struct{ Field string }{})
-	assert.Error(t, err)
+	assert.Error(err)
 }
 
 func TestBindQueryParams(t *testing.T) {
 	e := New()
-	req := httptest.NewRequest(GET, "/?id=1&name=Jon+Snow", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?id=1&name=Jon+Snow", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	u := new(user)
@@ -152,9 +206,35 @@ func TestBindQueryParams(t *testing.T) {
 	}
 }
 
+func TestBindQueryParamsCaseInsensitive(t *testing.T) {
+	e := New()
+	req := httptest.NewRequest(http.MethodGet, "/?ID=1&NAME=Jon+Snow", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	u := new(user)
+	err := c.Bind(u)
+	if assert.NoError(t, err) {
+		assert.Equal(t, 1, u.ID)
+		assert.Equal(t, "Jon Snow", u.Name)
+	}
+}
+
+func TestBindQueryParamsCaseSensitivePrioritized(t *testing.T) {
+	e := New()
+	req := httptest.NewRequest(http.MethodGet, "/?id=1&ID=2&NAME=Jon+Snow&name=Jon+Doe", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	u := new(user)
+	err := c.Bind(u)
+	if assert.NoError(t, err) {
+		assert.Equal(t, 1, u.ID)
+		assert.Equal(t, "Jon Doe", u.Name)
+	}
+}
+
 func TestBindUnmarshalParam(t *testing.T) {
 	e := New()
-	req := httptest.NewRequest(GET, "/?ts=2016-12-06T19:09:05Z&sa=one,two,three&ta=2016-12-06T19:09:05Z&ta=2016-12-06T19:09:05Z&ST=baz", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?ts=2016-12-06T19:09:05Z&sa=one,two,three&ta=2016-12-06T19:09:05Z&ta=2016-12-06T19:09:05Z&ST=baz", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	result := struct {
@@ -165,18 +245,42 @@ func TestBindUnmarshalParam(t *testing.T) {
 	}{}
 	err := c.Bind(&result)
 	ts := Timestamp(time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC))
+
+	assert := assert.New(t)
+	if assert.NoError(err) {
+		//		assert.Equal( Timestamp(reflect.TypeOf(&Timestamp{}), time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC)), result.T)
+		assert.Equal(ts, result.T)
+		assert.Equal(StringArray([]string{"one", "two", "three"}), result.SA)
+		assert.Equal([]Timestamp{ts, ts}, result.TA)
+		assert.Equal(Struct{"baz"}, result.ST)
+	}
+}
+
+func TestBindUnmarshalText(t *testing.T) {
+	e := New()
+	req := httptest.NewRequest(GET, "/?ts=2016-12-06T19:09:05Z&sa=one,two,three&ta=2016-12-06T19:09:05Z&ta=2016-12-06T19:09:05Z&ST=baz", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	result := struct {
+		T  time.Time   `query:"ts"`
+		TA []time.Time `query:"ta"`
+		SA StringArray `query:"sa"`
+		ST Struct
+	}{}
+	err := c.Bind(&result)
+	ts := time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC)
 	if assert.NoError(t, err) {
 		//		assert.Equal(t, Timestamp(reflect.TypeOf(&Timestamp{}), time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC)), result.T)
 		assert.Equal(t, ts, result.T)
 		assert.Equal(t, StringArray([]string{"one", "two", "three"}), result.SA)
-		assert.Equal(t, []Timestamp{ts, ts}, result.TA)
+		assert.Equal(t, []time.Time{ts, ts}, result.TA)
 		assert.Equal(t, Struct{"baz"}, result.ST)
 	}
 }
 
 func TestBindUnmarshalParamPtr(t *testing.T) {
 	e := New()
-	req := httptest.NewRequest(GET, "/?ts=2016-12-06T19:09:05Z", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?ts=2016-12-06T19:09:05Z", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	result := struct {
@@ -188,30 +292,98 @@ func TestBindUnmarshalParamPtr(t *testing.T) {
 	}
 }
 
+func TestBindUnmarshalTextPtr(t *testing.T) {
+	e := New()
+	req := httptest.NewRequest(GET, "/?ts=2016-12-06T19:09:05Z", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	result := struct {
+		Tptr *time.Time `query:"ts"`
+	}{}
+	err := c.Bind(&result)
+	if assert.NoError(t, err) {
+		assert.Equal(t, time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC), *result.Tptr)
+	}
+}
+
 func TestBindMultipartForm(t *testing.T) {
 	body := new(bytes.Buffer)
 	mw := multipart.NewWriter(body)
 	mw.WriteField("id", "1")
 	mw.WriteField("name", "Jon Snow")
 	mw.Close()
-	testBindOkay(t, body, mw.FormDataContentType())
+
+	assert := assert.New(t)
+	testBindOkay(assert, body, mw.FormDataContentType())
 }
 
 func TestBindUnsupportedMediaType(t *testing.T) {
-	testBindError(t, strings.NewReader(invalidContent), MIMEApplicationJSON)
+	assert := assert.New(t)
+	testBindError(assert, strings.NewReader(invalidContent), MIMEApplicationJSON, &json.SyntaxError{})
 }
 
 func TestBindbindData(t *testing.T) {
+	assert := assert.New(t)
 	ts := new(bindTestStruct)
 	b := new(DefaultBinder)
 	b.bindData(ts, values, "form")
-	assertBindTestStruct(t, ts)
+	assertBindTestStruct(assert, ts)
+}
+
+func TestBindParam(t *testing.T) {
+	e := New()
+	req := httptest.NewRequest(GET, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/users/:id/:name")
+	c.SetParamNames("id", "name")
+	c.SetParamValues("1", "Jon Snow")
+
+	u := new(user)
+	err := c.Bind(u)
+	if assert.NoError(t, err) {
+		assert.Equal(t, 1, u.ID)
+		assert.Equal(t, "Jon Snow", u.Name)
+	}
+
+	// Second test for the absence of a param
+	c2 := e.NewContext(req, rec)
+	c2.SetPath("/users/:id")
+	c2.SetParamNames("id")
+	c2.SetParamValues("1")
+
+	u = new(user)
+	err = c2.Bind(u)
+	if assert.NoError(t, err) {
+		assert.Equal(t, 1, u.ID)
+		assert.Equal(t, "", u.Name)
+	}
+
+	// Bind something with param and post data payload
+	body := bytes.NewBufferString(`{ "name": "Jon Snow" }`)
+	e2 := New()
+	req2 := httptest.NewRequest(POST, "/", body)
+	req2.Header.Set(HeaderContentType, MIMEApplicationJSON)
+
+	rec2 := httptest.NewRecorder()
+
+	c3 := e2.NewContext(req2, rec2)
+	c3.SetPath("/users/:id")
+	c3.SetParamNames("id")
+	c3.SetParamValues("1")
+
+	u = new(user)
+	err = c3.Bind(u)
+	if assert.NoError(t, err) {
+		assert.Equal(t, 1, u.ID)
+		assert.Equal(t, "Jon Snow", u.Name)
+	}
 }
 
 func TestBindUnmarshalTypeError(t *testing.T) {
 	body := bytes.NewBufferString(`{ "id": "text" }`)
 	e := New()
-	req := httptest.NewRequest(POST, "/", body)
+	req := httptest.NewRequest(http.MethodPost, "/", body)
 	req.Header.Set(HeaderContentType, MIMEApplicationJSON)
 
 	rec := httptest.NewRecorder()
@@ -220,12 +392,13 @@ func TestBindUnmarshalTypeError(t *testing.T) {
 
 	err := c.Bind(u)
 
-	he := &HTTPError{Code: http.StatusBadRequest, Message: "Unmarshal type error: expected=int, got=string, field=id, offset=14"}
+	he := &HTTPError{Code: http.StatusBadRequest, Message: "Unmarshal type error: expected=int, got=string, field=id, offset=14", Internal: err.(*HTTPError).Internal}
 
 	assert.Equal(t, he, err)
 }
 
 func TestBindSetWithProperType(t *testing.T) {
+	assert := assert.New(t)
 	ts := new(bindTestStruct)
 	typ := reflect.TypeOf(ts).Elem()
 	val := reflect.ValueOf(ts).Elem()
@@ -240,9 +413,9 @@ func TestBindSetWithProperType(t *testing.T) {
 		}
 		val := values[typeField.Name][0]
 		err := setWithProperType(typeField.Type.Kind(), val, structField)
-		assert.NoError(t, err)
+		assert.NoError(err)
 	}
-	assertBindTestStruct(t, ts)
+	assertBindTestStruct(assert, ts)
 
 	type foo struct {
 		Bar bytes.Buffer
@@ -250,86 +423,116 @@ func TestBindSetWithProperType(t *testing.T) {
 	v := &foo{}
 	typ = reflect.TypeOf(v).Elem()
 	val = reflect.ValueOf(v).Elem()
-	assert.Error(t, setWithProperType(typ.Field(0).Type.Kind(), "5", val.Field(0)))
+	assert.Error(setWithProperType(typ.Field(0).Type.Kind(), "5", val.Field(0)))
 }
 
 func TestBindSetFields(t *testing.T) {
+	assert := assert.New(t)
+
 	ts := new(bindTestStruct)
 	val := reflect.ValueOf(ts).Elem()
 	// Int
-	if assert.NoError(t, setIntField("5", 0, val.FieldByName("I"))) {
-		assert.Equal(t, 5, ts.I)
+	if assert.NoError(setIntField("5", 0, val.FieldByName("I"))) {
+		assert.Equal(5, ts.I)
 	}
-	if assert.NoError(t, setIntField("", 0, val.FieldByName("I"))) {
-		assert.Equal(t, 0, ts.I)
+	if assert.NoError(setIntField("", 0, val.FieldByName("I"))) {
+		assert.Equal(0, ts.I)
 	}
 
 	// Uint
-	if assert.NoError(t, setUintField("10", 0, val.FieldByName("UI"))) {
-		assert.Equal(t, uint(10), ts.UI)
+	if assert.NoError(setUintField("10", 0, val.FieldByName("UI"))) {
+		assert.Equal(uint(10), ts.UI)
 	}
-	if assert.NoError(t, setUintField("", 0, val.FieldByName("UI"))) {
-		assert.Equal(t, uint(0), ts.UI)
+	if assert.NoError(setUintField("", 0, val.FieldByName("UI"))) {
+		assert.Equal(uint(0), ts.UI)
 	}
 
 	// Float
-	if assert.NoError(t, setFloatField("15.5", 0, val.FieldByName("F32"))) {
-		assert.Equal(t, float32(15.5), ts.F32)
+	if assert.NoError(setFloatField("15.5", 0, val.FieldByName("F32"))) {
+		assert.Equal(float32(15.5), ts.F32)
 	}
-	if assert.NoError(t, setFloatField("", 0, val.FieldByName("F32"))) {
-		assert.Equal(t, float32(0.0), ts.F32)
+	if assert.NoError(setFloatField("", 0, val.FieldByName("F32"))) {
+		assert.Equal(float32(0.0), ts.F32)
 	}
 
 	// Bool
-	if assert.NoError(t, setBoolField("true", val.FieldByName("B"))) {
-		assert.Equal(t, true, ts.B)
+	if assert.NoError(setBoolField("true", val.FieldByName("B"))) {
+		assert.Equal(true, ts.B)
 	}
-	if assert.NoError(t, setBoolField("", val.FieldByName("B"))) {
-		assert.Equal(t, false, ts.B)
+	if assert.NoError(setBoolField("", val.FieldByName("B"))) {
+		assert.Equal(false, ts.B)
 	}
 
 	ok, err := unmarshalFieldNonPtr("2016-12-06T19:09:05Z", val.FieldByName("T"))
-	if assert.NoError(t, err) {
-		assert.Equal(t, ok, true)
-		assert.Equal(t, Timestamp(time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC)), ts.T)
+	if assert.NoError(err) {
+		assert.Equal(ok, true)
+		assert.Equal(Timestamp(time.Date(2016, 12, 6, 19, 9, 5, 0, time.UTC)), ts.T)
 	}
 }
 
-func assertBindTestStruct(t *testing.T, ts *bindTestStruct) {
-	assert.Equal(t, 0, ts.I)
-	assert.Equal(t, int8(8), ts.I8)
-	assert.Equal(t, int16(16), ts.I16)
-	assert.Equal(t, int32(32), ts.I32)
-	assert.Equal(t, int64(64), ts.I64)
-	assert.Equal(t, uint(0), ts.UI)
-	assert.Equal(t, uint8(8), ts.UI8)
-	assert.Equal(t, uint16(16), ts.UI16)
-	assert.Equal(t, uint32(32), ts.UI32)
-	assert.Equal(t, uint64(64), ts.UI64)
-	assert.Equal(t, true, ts.B)
-	assert.Equal(t, float32(32.5), ts.F32)
-	assert.Equal(t, float64(64.5), ts.F64)
-	assert.Equal(t, "test", ts.S)
-	assert.Equal(t, "", ts.GetCantSet())
+func BenchmarkBindbindData(b *testing.B) {
+	b.ReportAllocs()
+	assert := assert.New(b)
+	ts := new(bindTestStruct)
+	binder := new(DefaultBinder)
+	var err error
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err = binder.bindData(ts, values, "form")
+	}
+	assert.NoError(err)
+	assertBindTestStruct(assert, ts)
 }
 
-func testBindOkay(t *testing.T, r io.Reader, ctype string) {
+func BenchmarkBindbindDataWithTags(b *testing.B) {
+	b.ReportAllocs()
+	assert := assert.New(b)
+	ts := new(bindTestStructWithTags)
+	binder := new(DefaultBinder)
+	var err error
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err = binder.bindData(ts, values, "form")
+	}
+	assert.NoError(err)
+	assertBindTestStruct(assert, (*bindTestStruct)(ts))
+}
+
+func assertBindTestStruct(a *assert.Assertions, ts *bindTestStruct) {
+	a.Equal(0, ts.I)
+	a.Equal(int8(8), ts.I8)
+	a.Equal(int16(16), ts.I16)
+	a.Equal(int32(32), ts.I32)
+	a.Equal(int64(64), ts.I64)
+	a.Equal(uint(0), ts.UI)
+	a.Equal(uint8(8), ts.UI8)
+	a.Equal(uint16(16), ts.UI16)
+	a.Equal(uint32(32), ts.UI32)
+	a.Equal(uint64(64), ts.UI64)
+	a.Equal(true, ts.B)
+	a.Equal(float32(32.5), ts.F32)
+	a.Equal(float64(64.5), ts.F64)
+	a.Equal("test", ts.S)
+	a.Equal("", ts.GetCantSet())
+}
+
+func testBindOkay(assert *assert.Assertions, r io.Reader, ctype string) {
 	e := New()
-	req := httptest.NewRequest(POST, "/", r)
+	req := httptest.NewRequest(http.MethodPost, "/", r)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	req.Header.Set(HeaderContentType, ctype)
 	u := new(user)
 	err := c.Bind(u)
-	if assert.NoError(t, err) {
-		assert.Equal(t, 1, u.ID)
-		assert.Equal(t, "Jon Snow", u.Name)
+	if assert.NoError(err) {
+		assert.Equal(1, u.ID)
+		assert.Equal("Jon Snow", u.Name)
 	}
 }
 
-func testBindError(t *testing.T, r io.Reader, ctype string) {
+func testBindError(assert *assert.Assertions, r io.Reader, ctype string, expectedInternal error) {
 	e := New()
-	req := httptest.NewRequest(POST, "/", r)
+	req := httptest.NewRequest(http.MethodPost, "/", r)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	req.Header.Set(HeaderContentType, ctype)
@@ -339,12 +542,14 @@ func testBindError(t *testing.T, r io.Reader, ctype string) {
 	switch {
 	case strings.HasPrefix(ctype, MIMEApplicationJSON), strings.HasPrefix(ctype, MIMEApplicationXML), strings.HasPrefix(ctype, MIMETextXML),
 		strings.HasPrefix(ctype, MIMEApplicationForm), strings.HasPrefix(ctype, MIMEMultipartForm):
-		if assert.IsType(t, new(HTTPError), err) {
-			assert.Equal(t, http.StatusBadRequest, err.(*HTTPError).Code)
+		if assert.IsType(new(HTTPError), err) {
+			assert.Equal(http.StatusBadRequest, err.(*HTTPError).Code)
+			assert.IsType(expectedInternal, err.(*HTTPError).Internal)
 		}
 	default:
-		if assert.IsType(t, new(HTTPError), err) {
-			assert.Equal(t, ErrUnsupportedMediaType, err)
+		if assert.IsType(new(HTTPError), err) {
+			assert.Equal(ErrUnsupportedMediaType, err)
+			assert.IsType(expectedInternal, err.(*HTTPError).Internal)
 		}
 	}
 }
